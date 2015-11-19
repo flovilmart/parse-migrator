@@ -50,10 +50,10 @@ Migrator.prototype.collectPointer = function(object, key)
 	if (!destinationPointedObject) {
 		self.activateSourceApp();
 		return pointedObject.fetch().then(function(o){
-			return self.migrate(o).then(function(migratedObject){
+			return self.migrateObject(o).then(function(migratedObject){
 				kv[key] = migratedObject;
 				return Parse.Promise.as(kv);
-			})
+			});
 		}).fail(function(err){
 			console.error(err);
 			return Parse.Promise.as({});
@@ -94,6 +94,8 @@ Migrator.prototype.migrateClass = function(className)
 	var q = new Parse.Query(className);
 	return q.each(function(object){
 		return self.migrateObject(object);
+	}).then(function(){
+		self.activateSourceApp();
 	})
 }
 
@@ -103,16 +105,19 @@ Migrator.prototype.migrateObject = function(object, options)
 	var self = this;
 
 	this.hashs[hashObject(object)] = object;
+	
 	console.log("Exporting "+hashObject(object));
+	
 	options = options || {};
+	
 	var jsonObject = object.toJSON();
 	var keys = Object.keys(jsonObject);
 	var migratedObject;
+	
 	return this.migrate(object).then(function(_migratedObject){
 		migratedObject = _migratedObject;
 		var promises = keys.map(function(key, index){
 			var value = jsonObject[key];
-
 			if (_.isObject(value)) {
 				if (value.__type == "Pointer") {
 					return self.collectPointer(object, key);
@@ -140,14 +145,12 @@ Migrator.prototype.migrateObject = function(object, options)
 		delete result.objectId;
 		delete result.updatedAt;
 		delete result.createdAt;
+
 		self.activateDestinationApp();
-		console.log(result);
-		console.log("Post migration save---")
 		migratedObject.set(result);
 		//return result;
 		return migratedObject.save().then(function(){
 			self.activateSourceApp();
-			console.log("POST MIGRATION SAVED!");
 			return Parse.Promise.as(migratedObject);
 		})
 	})
@@ -168,58 +171,63 @@ Migrator.prototype.findOrCreateDestinationId = function(object)
 	q.exists(self.destinationApp.applicationId+"_objectId");
 
 	return q.first().then(function(object){
+		
 		if (object) {
-			console.log("Found");
-			self.activateSourceApp();
-			return Parse.Promise.as(object.get(self.destinationApp.applicationId+"_objectId"));
+			return Parse.Promise.as(object);
 		}else{
 			console.log("Not Found");
 			return Parse.Promise.error();
 		}
+	
 	}).fail(function(){
-		// remove the object Id;
+		// On the destination DB
 		self.activateDestinationApp();
+		// Save a placeholder object to generate an objectId
 		var toSaveObject = new Parse.Object(object.className);
-		return toSaveObject.save().fail(function(err){
-			console.error(err);
-		}).then(function(_otherObject){
-			otherObject = _otherObject;
+		
+		return toSaveObject.save().then(function(otherObject){
+
+			// On the migration DB
 			self.activateMigrationApp();
+			
 			var migratedObject = new Parse.Object("MigratedObject");
 			var migratedObjectJSON = {
 				object_className: object.className,
 			};
 			migratedObjectJSON[self.sourceApp.applicationId+"_objectId"] = sourceId;
 			migratedObjectJSON[self.destinationApp.applicationId+"_objectId"] = otherObject.id;
+
 			return migratedObject.save(migratedObjectJSON);
-		}).then(function(migratedObject){
-			self.activateSourceApp();
-			return Parse.Promise.as(migratedObject.get(self.destinationApp.applicationId+"_objectId"));
+
 		});
+
+	}).then(function(migratedObject){
+		self.activateSourceApp();
+		return Parse.Promise.as(migratedObject.get(self.destinationApp.applicationId+"_objectId"));
 	});
 }
 
 Migrator.prototype.migrate = function(object)
 {
 	var self = this;
+	
 	var className = object.className;
 	var sourceId = object.id;
+
 	return this.findOrCreateDestinationId(object).then(function(destinationId){
 		self.activateDestinationApp();
 		// We have an existing object.. let's use it
 		var q = new Parse.Query(className);
 		return q.get(destinationId);
+	
 	}).then(function(destinationObject){
+		
 		// Cache the destination object for reuse
 		self.cacheDestinationObject(destinationObject, object);
-		return Parse.Promise.as(destinationObject);
-		//return self.updateDestinationObject(destinationObject, object);
-
-	}).then(function(destinationObject){
-		// Back to the source app
 		self.activateSourceApp();
 		return Parse.Promise.as(destinationObject);
-	})
+
+	});
 }
 
 Migrator.prototype.cacheDestinationObject = function(destinationObject, sourceObject) 
